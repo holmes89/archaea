@@ -26,6 +26,7 @@ func NewConsumer[T proto.Message](brokers []string, groupID *string, convertor f
 
 	var t T
 	topic := strings.Replace(fmt.Sprintf("%T", t), "*", "", 1)
+	fmt.Printf("listening to topic: %s with group ID: %s\n", topic, *groupID)
 	client, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
 		kgo.ConsumerGroup(*groupID),
