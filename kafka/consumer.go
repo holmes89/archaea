@@ -4,91 +4,107 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"strings"
+	"reflect"
 
-	"github.com/google/uuid"
-	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/segmentio/kafka-go"
 	"google.golang.org/protobuf/proto"
 )
 
-type Consumer[T any] struct {
-	client *kgo.Client
-	ch     chan *kgo.Record
-	out    chan T
-	topic  string
+// Consumer implements a simple Kafka consumer.
+type Consumer[T proto.Message] struct {
+	reader    *kafka.Reader
+	messages  chan T
+	unmarshal func([]byte) (T, error)
+	ctx       context.Context
+	cancel    context.CancelFunc
 }
 
-func NewConsumer[T proto.Message](brokers []string, groupID *string, convertor func([]byte) (T, error)) *Consumer[T] {
-	if groupID == nil {
-		uid := uuid.New().String()
-		groupID = &uid
+// NewConsumer creates a new Kafka consumer for a topic inferred from message type.
+func NewConsumer[T proto.Message](brokers []string, groupID *string, unmarshal func([]byte) (T, error)) *Consumer[T] {
+	group := "default-group"
+	if groupID != nil {
+		group = *groupID
 	}
 
-	var t T
-	topic := strings.Replace(fmt.Sprintf("%T", t), "*", "", 1)
-	fmt.Printf("listening to topic: %s with group ID: %s\n", topic, *groupID)
-	client, err := kgo.NewClient(
-		kgo.SeedBrokers(brokers...),
-		kgo.ConsumerGroup(*groupID),
-		kgo.ConsumeTopics(topic),
-		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
-	)
-	if err != nil {
-		fmt.Println("failed to create kafka consumer client:", err)
-		panic(err)
-	}
-	ch := make(chan *kgo.Record)
-	out := make(chan T)
+	var msg T
+	topic := fmt.Sprintf("%T", msg)
 
-	go func() {
-		for message := range ch {
-			msg, err := convertor(message.Value)
-			if err != nil {
-				log.Printf("unable to process message: %s\n", err)
-				continue
-			}
-			out <- msg
-		}
-		close(out)
-	}()
+	reader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers:  brokers,
+		Topic:    topic,
+		GroupID:  group,
+		MinBytes: 10e3,
+		MaxBytes: 10e6,
+	})
 
+	ctx, cancel := context.WithCancel(context.Background())
 	c := &Consumer[T]{
-		client: client,
-		topic:  topic,
-		ch:     ch,
-		out:    out,
+		reader:    reader,
+		messages:  make(chan T, 100),
+		unmarshal: unmarshal,
+		ctx:       ctx,
+		cancel:    cancel,
 	}
-	go c.read()
+	go c.start()
 	return c
 }
-func (c *Consumer[T]) ReadMessages() <-chan *kgo.Record {
-	return c.ch
-}
 
+// Read returns a channel for reading messages.
 func (c *Consumer[T]) Read() <-chan T {
-	return c.out
+	return c.messages
 }
 
-func (c *Consumer[T]) read() {
-	ctx := context.Background()
+// Close stops the consumer and closes the reader.
+func (c *Consumer[T]) Close() {
+	c.cancel()
+	if err := c.reader.Close(); err != nil {
+		log.Printf("error closing Kafka reader: %v", err)
+	}
+}
+
+func (c *Consumer[T]) start() {
+	defer close(c.messages)
 	for {
-		fetches := c.client.PollFetches(ctx)
-		iter := fetches.RecordIter()
-		for !iter.Done() {
-			record := iter.Next()
-			if record == nil {
+		select {
+		case <-c.ctx.Done():
+			return
+		default:
+			msg, err := c.reader.ReadMessage(c.ctx)
+			if err != nil {
+				if err == context.Canceled {
+					return
+				}
+				log.Printf("error reading message: %v", err)
 				continue
 			}
-			c.ch <- record
+
+			entity, err := c.unmarshal(msg.Value)
+			if err != nil {
+				log.Printf("error unmarshaling message: %v", err)
+				continue
+			}
+			c.messages <- entity
 		}
 	}
 }
 
-type Deserializer[T any] interface {
-	Unmarshal([]byte, *T) error
+// ProtoUnmarshal is a helper to unmarshal protobuf messages generically.
+func ProtoUnmarshal[T proto.Message](data []byte) (T, error) {
+	var zero T
+	msg := newMessage[T]()
+	if err := proto.Unmarshal(data, msg); err != nil {
+		return zero, err
+	}
+	return msg, nil
 }
 
-func (c *Consumer[T]) Close() {
-	c.client.Close()
-	close(c.ch)
+func newMessage[T proto.Message]() T {
+	var zero T
+	t := reflect.TypeOf(zero)
+	if t.Kind() == reflect.Ptr {
+		v := reflect.New(t.Elem())
+		return v.Interface().(T)
+	}
+	v := reflect.New(t).Elem()
+	return v.Addr().Interface().(T)
 }

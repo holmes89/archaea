@@ -1,11 +1,9 @@
 package base
 
-import (
-	"context"
-	"time"
-)
+import "context"
 
-type Producer[T any] interface {
-	Publish(context.Context, T, string, time.Time) error
+// Producer defines the interface for message producers
+type Producer[T Entity] interface {
+	Publish(ctx context.Context, entity T) error
 	Close() error
 }

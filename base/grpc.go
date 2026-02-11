@@ -3,72 +3,107 @@ package base
 import (
 	"context"
 	"log"
-	"time"
 
 	"connectrpc.com/connect"
-	"github.com/google/uuid"
 )
 
+// GenericGRPCService provides a base implementation for gRPC services
+// that wraps a business logic Service and optionally publishes events
 type GenericGRPCService[T Entity] struct {
-	svc       Service[T]
-	publisher Producer[T]
+	Service   Service[T]
+	Publisher Producer[T]
 }
 
-func (s *GenericGRPCService[T]) Get(ctx context.Context, rawreq connect.AnyRequest, req GetRequest[T]) (GetResponse[T], error) {
-	log.Printf("Get called - Protocol: %s", rawreq.Header().Get("Connect-Protocol-Version"))
-	var t T
-	log.Printf("Get %T request: %+v", t, req)
-
-	return s.svc.Get(ctx, req)
-}
-
-func (s *GenericGRPCService[T]) List(ctx context.Context, rawreq connect.AnyRequest, req ListRequest) (ListResponse[T], error) {
-	log.Printf("List called - Protocol: %s", rawreq.Header().Get("Connect-Protocol-Version"))
-	var t T
-	log.Printf("List %T content: %+v", t, req)
-
-	count := req.GetCount()
-	if count != req.GetCount() {
-		log.Printf("Request count: %d", req.GetCount())
-	} else {
-		log.Printf("Request count is nil")
+// NewGenericGRPCService creates a new generic gRPC service
+func NewGenericGRPCService[T Entity](svc Service[T], publisher Producer[T]) *GenericGRPCService[T] {
+	return &GenericGRPCService[T]{
+		Service:   svc,
+		Publisher: publisher,
 	}
+}
 
-	resp, err := s.svc.List(ctx, req)
+// List handles list requests by delegating to the service
+func (g *GenericGRPCService[T]) List(ctx context.Context, req *connect.Request[any], listReq ListRequest) (ListResponse[T], error) {
+	log.Printf("Listing entities with cursor: %s, count: %d", listReq.GetCursor(), listReq.GetCount())
+
+	resp, err := g.Service.List(ctx, listReq)
 	if err != nil {
-		log.Printf("Error from service: %v", err)
+		log.Printf("Error listing entities: %v", err)
 		return nil, err
 	}
 
-	log.Printf("Service returned %d %T", len(resp.GetData()), t)
-
+	log.Printf("Successfully listed %d entities", len(resp.GetData()))
 	return resp, nil
 }
 
-func (s *GenericGRPCService[T]) Create(ctx context.Context, rawreq connect.AnyRequest, req CreateRequest[T]) (string, error) {
-	log.Printf("CreateBook called - Protocol: %s", rawreq.Header().Get("Connect-Protocol-Version"))
-	var t T
-	log.Printf("Create %T request: %+v", t, req)
+// Get handles get requests by delegating to the service
+func (g *GenericGRPCService[T]) Get(ctx context.Context, req *connect.Request[any], getReq GetRequest[T]) (GetResponse[T], error) {
+	log.Printf("Getting entity with ID: %s", getReq.GetUuid())
 
-	e := req.GetData()
-	id := e.GetUuid()
-	if id == "" {
-		id = uuid.NewString()
-	}
-	log.Printf("publish create %T - %s", t, id)
-
-	err := s.publisher.Publish(ctx, e, id, time.Now())
+	resp, err := g.Service.Get(ctx, getReq)
 	if err != nil {
-		log.Printf("Error publishing event: %v", err)
+		log.Printf("Error getting entity: %v", err)
+		return nil, err
+	}
+
+	log.Printf("Successfully retrieved entity")
+	return resp, nil
+}
+
+// Create handles create requests by delegating to the service and publishing events
+func (g *GenericGRPCService[T]) Create(ctx context.Context, req *connect.Request[any], createReq CreateRequest[T]) (string, error) {
+	log.Printf("Creating new entity")
+
+	resp, err := g.Service.Create(ctx, createReq)
+	if err != nil {
+		log.Printf("Error creating entity: %v", err)
 		return "", err
 	}
 
-	return id, nil
+	entity := resp.GetData()
+
+	// Publish event if publisher is configured
+	if g.Publisher != nil {
+		if err := g.Publisher.Publish(ctx, entity); err != nil {
+			log.Printf("Warning: failed to publish create event: %v", err)
+			// Don't fail the request if publishing fails
+		}
+	}
+
+	log.Printf("Successfully created entity with ID: %s", entity.GetUuid())
+	return entity.GetUuid(), nil
 }
 
-func NewGenericGRPCService[T Entity](svc Service[T], publisher Producer[T]) *GenericGRPCService[T] {
-	return &GenericGRPCService[T]{
-		svc:       svc,
-		publisher: publisher,
+// Update handles update requests by delegating to the service and publishing events
+func (g *GenericGRPCService[T]) Update(ctx context.Context, req *connect.Request[any], updateReq UpdateRequest[T]) error {
+	log.Printf("Updating entity")
+
+	entity := updateReq.GetData()
+	if _, err := g.Service.Update(ctx, updateReq); err != nil {
+		log.Printf("Error updating entity: %v", err)
+		return err
 	}
+
+	// Publish event if publisher is configured
+	if g.Publisher != nil {
+		if err := g.Publisher.Publish(ctx, entity); err != nil {
+			log.Printf("Warning: failed to publish update event: %v", err)
+		}
+	}
+
+	log.Printf("Successfully updated entity")
+	return nil
+}
+
+// Delete handles delete requests by delegating to the service
+func (g *GenericGRPCService[T]) Delete(ctx context.Context, req *connect.Request[any], deleteReq DeleteRequest) error {
+	log.Printf("Deleting entity with ID: %s", deleteReq.GetUuid())
+
+	if err := g.Service.Delete(ctx, deleteReq.GetUuid()); err != nil {
+		log.Printf("Error deleting entity: %v", err)
+		return err
+	}
+
+	log.Printf("Successfully deleted entity")
+	return nil
 }
