@@ -2,42 +2,53 @@ package kafka
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
+	"time"
 
-	"github.com/segmentio/kafka-go"
+	"github.com/twmb/franz-go/pkg/kgo"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
-// Producer implements a simple Kafka producer.
-type Producer[T proto.Message] struct {
-	writer *kafka.Writer
+type Producer[T stringer] struct {
+	client *kgo.Client
 	topic  string
 }
 
-// NewProducer creates a new Kafka producer for a given topic.
-func NewProducer[T proto.Message](conn *Conn, topic string) *Producer[T] {
-	_ = conn.EnsureTopic(topic, 1, 1)
+type stringer interface {
+	ProtoReflect() protoreflect.Message
+}
+
+func NewProducer[T stringer](conn *Conn) *Producer[T] {
+	var t T
+	topic := strings.Replace(fmt.Sprintf("%T", t), "*", "", 1)
+	conn.CreateTopic(topic)
 	return &Producer[T]{
-		writer: conn.CreateWriter(topic),
+		client: conn.client,
 		topic:  topic,
 	}
 }
-
-// Publish marshals and sends a message to Kafka.
-func (p *Producer[T]) Publish(ctx context.Context, entity T) error {
-	data, err := proto.Marshal(entity)
+func (p *Producer[T]) Publish(ctx context.Context, message T, id string, _ time.Time) error {
+	i := []byte(id)
+	b, err := proto.Marshal(message)
 	if err != nil {
-		return fmt.Errorf("failed to marshal proto message: %w", err)
+		fmt.Printf("unable to send message: %s", err)
+		return errors.New("unable to publish message")
 	}
+	fmt.Println("producing message to topic:", p.topic)
+	p.client.Produce(context.Background(), &kgo.Record{Topic: p.topic, Value: b, Key: i}, func(k *kgo.Record, err error) {
+		if err != nil {
+			fmt.Printf("failed to produce message: %s\n", err)
+			return
+		}
 
-	err = p.writer.WriteMessages(ctx, kafka.Message{Value: data})
-	if err != nil {
-		return fmt.Errorf("failed to write message to kafka: %w", err)
-	}
-	return nil
+		fmt.Printf("message %s produced successfully on topic %s\n", id, p.topic)
+	})
+	return nil //todo maybe fix for err handling
 }
-
-// Close closes the producer.
 func (p *Producer[T]) Close() error {
-	return p.writer.Close()
+	p.client.Close()
+	return nil
 }

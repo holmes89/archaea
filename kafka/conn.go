@@ -1,74 +1,115 @@
 package kafka
 
 import (
-	"log"
+	"context"
+	"fmt"
+	"time"
 
-	"github.com/segmentio/kafka-go"
+	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// Conn wraps a Kafka connection with common configuration.
 type Conn struct {
-	brokers []string
+	client      *kgo.Client
+	adminClient *kadm.Client
+	brokers     []string
 }
 
-// NewConn creates a new Kafka connection helper.
 func NewConn(brokers []string) *Conn {
-	return &Conn{brokers: brokers}
-}
+	fmt.Println("connecting to kafka...")
 
-// GetBrokers returns the configured broker list.
-func (c *Conn) GetBrokers() []string { return c.brokers }
-
-// Close is a no-op placeholder (writers/readers manage their own lifecycle).
-func (c *Conn) Close() error { return nil }
-
-// EnsureTopic creates a topic if it does not exist.
-func (c *Conn) EnsureTopic(topic string, numPartitions int, replicationFactor int) error {
-	conn, err := kafka.Dial("tcp", c.brokers[0])
+	// Create the base kgo client
+	client, err := kgo.NewClient(
+		kgo.SeedBrokers(brokers...),
+		kgo.RequestTimeoutOverhead(30*time.Second), // 10 second timeout
+	)
 	if err != nil {
-		return err
+		fmt.Println("failed to create kafka client:", err)
+		panic(err)
 	}
-	defer conn.Close()
 
-	controller, err := conn.Controller()
+	// Create admin client from the same base client
+	adminClient := kadm.NewClient(client)
+
+	// Test connection
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // 30 second timeout
+	defer cancel()
+
+	res, err := adminClient.ListTopics(ctx)
 	if err != nil {
-		return err
+		fmt.Println("failed to list kafka topics:", err)
+		client.Close()
+		panic(err)
 	}
+	fmt.Printf("found %d topics\n", len(res))
+	fmt.Println("connected.")
 
-	controllerConn, err := kafka.Dial("tcp", controller.Host)
-	if err != nil {
-		return err
-	}
-	defer controllerConn.Close()
-
-	topicConfigs := []kafka.TopicConfig{{
-		Topic:             topic,
-		NumPartitions:     numPartitions,
-		ReplicationFactor: replicationFactor,
-	}}
-
-	if err := controllerConn.CreateTopics(topicConfigs...); err != nil {
-		log.Printf("Warning: could not create topic %s: %v", topic, err)
-	}
-	return nil
-}
-
-// CreateWriter creates a Kafka writer for a specific topic.
-func (c *Conn) CreateWriter(topic string) *kafka.Writer {
-	return &kafka.Writer{
-		Addr:     kafka.TCP(c.brokers...),
-		Topic:    topic,
-		Balancer: &kafka.LeastBytes{},
+	return &Conn{
+		client:      client,
+		adminClient: adminClient,
+		brokers:     brokers,
 	}
 }
 
-// CreateReader creates a Kafka reader for a specific topic and consumer group.
-func (c *Conn) CreateReader(topic string, groupID string) *kafka.Reader {
-	return kafka.NewReader(kafka.ReaderConfig{
-		Brokers:  c.brokers,
-		Topic:    topic,
-		GroupID:  groupID,
-		MinBytes: 10e3,
-		MaxBytes: 10e6,
-	})
+func (c *Conn) TopicExists(topic string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // 10 second timeout
+	defer cancel()
+
+	topicsMetadata, err := c.adminClient.ListTopics(ctx)
+	if err != nil {
+		fmt.Println("failed to verify topics:", err)
+		return false // Return false instead of panic to handle gracefully
+	}
+
+	for _, metadata := range topicsMetadata {
+		if metadata.Topic == topic {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Conn) CreateTopicIfNotExists(topic string) {
+	fmt.Println("verifying topic:", topic)
+	if !c.TopicExists(topic) {
+		c.CreateTopic(topic)
+	}
+}
+
+func (c *Conn) CreateTopic(topic string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // 30 second timeout
+	defer cancel()
+
+	fmt.Println("creating topic on brokers:", c.brokers)
+
+	// Create topic with proper configuration
+	resp, err := c.adminClient.CreateTopics(ctx, 1, 1, nil, topic)
+	if err != nil {
+		fmt.Println("failed to create kafka topic:", err)
+		panic(err)
+	}
+
+	for _, ctr := range resp {
+		if ctr.Err != nil {
+			fmt.Printf("Unable to create topic '%s': %s\n", ctr.Topic, ctr.Err)
+		} else {
+			fmt.Printf("Created topic '%s'\n", ctr.Topic)
+		}
+	}
+}
+
+// GetClient returns the underlying kgo.Client for producer/consumer operations
+func (c *Conn) GetClient() *kgo.Client {
+	return c.client
+}
+
+// GetAdminClient returns the admin client for administrative operations
+func (c *Conn) GetAdminClient() *kadm.Client {
+	return c.adminClient
+}
+
+func (c *Conn) Close() {
+	if c.client != nil {
+		c.client.Close()
+	}
 }
