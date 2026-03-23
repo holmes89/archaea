@@ -1,190 +1,68 @@
-# Archaea - Common Base Abstractions
+# archaea
 
-This directory contains common patterns and base implementations that should be moved to the `github.com/holmes89/archaea` repository.
+`archaea` (`github.com/holmes89/archaea`) is a Go library of shared base abstractions for building event-driven microservices. It provides generic, reusable implementations of the most common service patterns — CRUD operations over a repository, gRPC/ConnectRPC handler scaffolding, and Kafka-backed messaging — so that downstream services only need to implement domain-specific logic.
 
-## Structure
+## Packages
 
-### `base/` - Core Interfaces and Base Implementations
+### `base` — Core interfaces and generic implementations
 
-#### `model.go`
-- **Entity** - Interface for domain entities
-- **Repository[T]** - Generic repository interface with CRUD operations
-- **Request/Response Interfaces** - ListRequest, GetRequest, CreateRequest, etc.
-- **Generic Response Types** - Concrete implementations of response interfaces
+- **`Entity`** — interface every domain object must satisfy (`GetUuid() string`).
+- **`Repository[T]`** — generic data-access interface (Create, Update, Delete, Get, List).
+- **Request/Response interfaces** — typed contracts for every CRUD operation.
+- **`GenericService[T]`** — concrete `Service[T]` that delegates to a `Repository[T]`. Embedding this eliminates List/Get/Create/Update boilerplate.
+- **`GenericGRPCService[T]`** — ConnectRPC handler that wraps a `Service[T]`, adds structured logging, and optionally publishes events via a `Producer[T]` on Create and Update. Publishing failures are logged but do not fail the RPC.
+- **`Consumer[T]` / `GenericConsumer[T]`** — bridges a message consumer to a `Service[T]`. Runs a background goroutine that reads from the consumer channel and calls `Service.Create` for each message.
+- **`Producer[T]`** — single-method abstraction (`Publish`) over any message transport.
 
-**Why move to archaea:**
-- Used by every generated service
-- Provides type-safe generic operations
-- Reduces boilerplate in generated code
+### `kafka` — Kafka-specific implementations
 
-#### `service.go`
-- **Service[T]** - Generic service interface
-- **GenericService[T]** - Base service implementation
-- Implements common List/Get/Create patterns using repositories
+Built on `github.com/twmb/franz-go`:
 
-**Why move to archaea:**
-- Eliminates duplicate service logic across projects
-- Provides consistent behavior
-- Easy to test and maintain
+- **`Conn`** — establishes a Kafka connection at startup (panics on failure). Wraps both a `kgo.Client` and a `kadm.Client`. Exposes `TopicExists`, `CreateTopicIfNotExists`, and `CreateTopic`.
+- **`Consumer[T]`** — generic Kafka consumer. Topic name is derived from the Go type name. Accepts an optional consumer group ID (random UUID if not provided). Implements `base.Consumer[T]`.
+- **`Producer[T]`** — generic Kafka producer. Topic derived from Go type name, created automatically at construction. Serialises with `proto.Marshal` and produces asynchronously.
 
-#### `grpc.go`
-- **GenericGRPCService[T]** - Base gRPC/Connect RPC service
-- Wraps business logic services
-- Handles logging and event publishing
-- Implements List/Get/Create/Update/Delete operations
+## Usage
 
-**Why move to archaea:**
-- Every gRPC service uses this pattern
-- Consistent error handling and logging
-- Built-in event publishing support
-
-#### `consumer.go`
-- **Consumer[T]** - Interface for message consumers
-- **GenericConsumer[T]** - Base consumer implementation
-- Processes messages through services
-
-**Why move to archaea:**
-- Standard pattern for Kafka consumers
-- Decouples message handling from business logic
-
-#### `producer.go`
-- **Producer[T]** - Interface for message producers
-- Simple event publishing abstraction
-
-**Why move to archaea:**
-- Used by all services that publish events
-- Clean abstraction over messaging infrastructure
-
-### `kafka/` - Kafka-Specific Implementations
-
-#### `conn.go`
-- **Conn** - Kafka connection wrapper
-- Topic management
-- Reader/Writer factory methods
-
-**Why move to archaea:**
-- Every project using Kafka needs this
-- Handles connection pooling and configuration
-- Topic creation logic
-
-#### `producer.go`
-- **Producer[T]** - Kafka producer implementation
-- Protobuf serialization
-- Error handling
-
-**Why move to archaea:**
-- Concrete implementation of Producer interface
-- Handles proto marshaling automatically
-- Standard pattern across all projects
-
-#### `consumer.go`
-- **Consumer[T]** - Kafka consumer implementation
-- Protobuf deserialization
-- Message processing loop
-- Auto-topic detection
-
-**Why move to archaea:**
-- Concrete implementation of Consumer interface
-- Handles proto unmarshaling automatically
-- Background processing with proper cleanup
-
-## Usage in Generated Code
-
-### Before (Current Template):
 ```go
-type BookService struct {
-    repo base.Repository[*Book]
+// 1. Implement base.Entity on your Protobuf-generated type (GetUuid already generated).
+
+// 2. Implement base.Repository[*YourEntity] against your database.
+
+// 3. Service layer — no List/Get/Create/Update code needed:
+type YourService struct {
+    *base.GenericService[*YourEntity]
+}
+func NewYourService(repo base.Repository[*YourEntity]) *YourService {
+    return &YourService{GenericService: base.NewGenericService(repo)}
 }
 
-func (s *BookService) List(ctx context.Context, req base.ListRequest) (base.ListResponse[*Book], error) {
-    data, err := s.repo.List(ctx, req.GetCursor(), uint(req.GetCount()), nil)
-    return &base.ListGenericResponse[*Book]{
-        Cursor: "",
-        Count:  10,
-        Data:   data,
-    }, err
+// 4. RPC handler — logging and event publishing are handled generically:
+type YourGRPCService struct {
+    *base.GenericGRPCService[*YourEntity]
 }
+func NewYourGRPCService(svc *YourService, pub base.Producer[*YourEntity]) *YourGRPCService {
+    return &YourGRPCService{GenericGRPCService: base.NewGenericGRPCService(svc, pub)}
+}
+
+// 5. Wire a Kafka consumer to persist inbound events automatically:
+consumer := kafka.NewConsumer[*YourEntity](brokers, nil, unmarshalFunc)
+base.NewGenericConsumer[*YourEntity](consumer, svc)
 ```
-
-### After (With Archaea):
-```go
-type BookService struct {
-    *base.GenericService[*Book]
-}
-
-func NewBookService(repo base.Repository[*Book]) *BookService {
-    return &BookService{
-        GenericService: base.NewGenericService(repo),
-    }
-}
-// List, Get, Create methods inherited!
-```
-
-### gRPC Service Before:
-```go
-type BookGRPCService struct {
-    service BookService
-    publisher base.Producer[*Book]
-}
-
-func (s *BookGRPCService) ListBooks(ctx context.Context, req *connect.Request[...]) (*connect.Response[...], error) {
-    // 30+ lines of boilerplate logging, error handling, response wrapping
-}
-```
-
-### gRPC Service After:
-```go
-type BookGRPCService struct {
-    *base.GenericGRPCService[*Book]
-}
-
-func NewBookGRPCService(svc BookService, pub base.Producer[*Book]) *BookGRPCService {
-    return &BookGRPCService{
-        GenericGRPCService: base.NewGenericGRPCService(svc, pub),
-    }
-}
-
-func (s *BookGRPCService) ListBooks(ctx context.Context, req *connect.Request[servicev1.ListBooksRequest]) (*connect.Response[servicev1.ListBooksResponse], error) {
-    data, err := s.List(ctx, req, req.Msg) // Delegates to generic implementation
-    if err != nil {
-        return nil, err
-    }
-    return connect.NewResponse(&servicev1.ListBooksResponse{
-        Data:   data.GetData(),
-        Cursor: data.GetCursor(),
-        Count:  data.GetCount(),
-    }), nil
-}
-```
-
-## Benefits
-
-1. **Less Code Generation** - Generate only entity-specific logic, not boilerplate
-2. **Easier Updates** - Fix bugs once in archaea, all services benefit
-3. **Consistent Behavior** - All services handle errors, logging, events the same way
-4. **Type Safety** - Generics ensure compile-time correctness
-5. **Testability** - Test generic implementations thoroughly once
-6. **Documentation** - Central place for patterns and best practices
-
-## Migration Path
-
-1. Copy these files to `github.com/holmes89/archaea`
-2. Update beaver templates to use archaea imports
-3. Regenerate existing projects to benefit from reduced boilerplate
-4. Add tests to archaea for generic implementations
-5. Version archaea releases for stability
 
 ## Dependencies
 
-- `connectrpc.com/connect` - Connect RPC framework
-- `google.golang.org/protobuf` - Protocol Buffers
-- `github.com/segmentio/kafka-go` - Kafka client
+| Dependency | Purpose |
+|---|---|
+| `connectrpc.com/connect` | ConnectRPC framework used in `GenericGRPCService` |
+| `github.com/twmb/franz-go` | Kafka client (produce/consume) |
+| `github.com/twmb/franz-go/pkg/kadm` | Kafka admin client (topic management) |
+| `google.golang.org/protobuf` | Protobuf serialisation/deserialisation in Kafka layer |
+| `github.com/google/uuid` | Random consumer group ID generation |
 
-## Next Steps
+## Known Limitations
 
-1. Move to archaea repository
-2. Add comprehensive tests
-3. Add examples and documentation
-4. Create versioned releases
-5. Update beaver templates to use archaea
-6. Add more generic patterns as they emerge (validation, caching, etc.)
+- `kafka.Producer.Publish` signature does not match the `base.Producer[T]` interface — callers need a thin adapter.
+- Kafka produce calls are fire-and-forget; callers should not rely on synchronous delivery guarantees.
+- `Conn.CreateTopic` and `NewConn` panic on failure rather than returning errors.
+- `GenericService.List` always returns an empty cursor string — cursor-based pagination is not yet functional.
