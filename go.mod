@@ -6,6 +6,7 @@ require (
 	connectrpc.com/connect v1.19.1
 	connectrpc.com/cors v0.1.0
 	github.com/google/uuid v1.6.0
+	github.com/maxence-charriere/go-app/v10 v10.1.5
 	github.com/rs/cors v1.11.1
 	github.com/stretchr/testify v1.11.1
 	github.com/twmb/franz-go v1.20.0
