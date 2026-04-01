@@ -53,8 +53,10 @@ func (s *Server) HandleFunc(pattern string, fn http.HandlerFunc) {
 
 // Run starts the HTTP/2 server and blocks until SIGINT, SIGTERM, or ctx is
 // cancelled. Returns the signal or context error that caused shutdown.
+// Wrap functions are applied from innermost to outermost (index 0 is closest
+// to the mux; h2c is always the outermost layer).
 func (s *Server) Run(ctx context.Context) error {
-	var h http.Handler = LoggingMiddleware(s.mux)
+	var h http.Handler = s.mux
 	for _, w := range s.wrap {
 		h = w(h)
 	}
