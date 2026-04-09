@@ -88,6 +88,16 @@ func NewClientFromEnv(defaultBucket string) *BlobClient {
 	return mc
 }
 
+// Download retrieves the object at key from the bucket and returns a
+// ReadCloser. The caller is responsible for closing the returned reader.
+func (c *BlobClient) Download(ctx context.Context, key string) (io.ReadCloser, error) {
+	r, err := c.bucket.NewReader(ctx, key, nil)
+	if err != nil {
+		return nil, fmt.Errorf("open blob reader for %s: %w", key, err)
+	}
+	return r, nil
+}
+
 // Upload writes r into the bucket under key with the given content type.
 func (c *BlobClient) Upload(ctx context.Context, key string, r io.Reader, _ int64, contentType string) error {
 	w, err := c.bucket.NewWriter(ctx, key, &blob.WriterOptions{ContentType: contentType})
