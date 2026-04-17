@@ -38,15 +38,13 @@ func (p *Producer[T]) Publish(ctx context.Context, message T, id string, _ time.
 		return errors.New("unable to publish message")
 	}
 	fmt.Println("producing message to topic:", p.topic)
-	p.client.Produce(context.Background(), &kgo.Record{Topic: p.topic, Value: b, Key: i}, func(k *kgo.Record, err error) {
-		if err != nil {
-			fmt.Printf("failed to produce message: %s\n", err)
-			return
-		}
-
-		fmt.Printf("message %s produced successfully on topic %s\n", id, p.topic)
-	})
-	return nil //todo maybe fix for err handling
+	results := p.client.ProduceSync(ctx, &kgo.Record{Topic: p.topic, Value: b, Key: i})
+	if err := results.FirstErr(); err != nil {
+		fmt.Printf("failed to produce message to %s: %s\n", p.topic, err)
+		return fmt.Errorf("publish to %s: %w", p.topic, err)
+	}
+	fmt.Printf("message %s produced successfully on topic %s\n", id, p.topic)
+	return nil
 }
 func (p *Producer[T]) Close() error {
 	p.client.Close()
