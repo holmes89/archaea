@@ -66,3 +66,18 @@ base.NewGenericConsumer[*YourEntity](consumer, svc)
 - Kafka produce calls are fire-and-forget; callers should not rely on synchronous delivery guarantees.
 - `Conn.CreateTopic` and `NewConn` panic on failure rather than returning errors.
 - `GenericService.List` always returns an empty cursor string — cursor-based pagination is not yet functional.
+
+## Development Setup
+
+### Git Hooks
+
+This repo ships pre-commit and pre-push hooks in `.githooks/`.
+
+- **pre-commit**: runs `go vet` and `golangci-lint` before every commit
+- **pre-push**: runs `go test -race ./...` before every push
+
+Install once per checkout:
+
+```sh
+make hooks
+```

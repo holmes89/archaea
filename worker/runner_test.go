@@ -82,9 +82,6 @@ func TestRun_ClosesInOrder(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var order []int
 
-	type orderedClosable struct {
-		n int
-	}
 	// Use a slice of Closable values.
 	closables := make([]worker.Closable, 3)
 	for i := 0; i < 3; i++ {
