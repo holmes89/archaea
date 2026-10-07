@@ -22,6 +22,11 @@ func NewConn(brokers []string) *Conn {
 	client, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
 		kgo.RequestTimeoutOverhead(30*time.Second), // 10 second timeout
+		// Bounds produce retries so a dead/unreachable broker fails fast
+		// instead of retrying indefinitely (franz-go's default). Publish's
+		// own per-call context timeout is the primary guard; this is
+		// defense in depth for any caller that doesn't set one.
+		kgo.RecordDeliveryTimeout(10*time.Second),
 	)
 	if err != nil {
 		fmt.Println("failed to create kafka client:", err)

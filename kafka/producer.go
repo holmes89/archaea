@@ -30,7 +30,15 @@ func NewProducer[T stringer](conn *Conn) *Producer[T] {
 		topic:  topic,
 	}
 }
+// publishTimeout bounds ProduceSync so a broker outage surfaces as an error
+// to the caller (an RPC handler blocking the client's HTTP response) instead
+// of hanging indefinitely — franz-go's default retry policy is unbounded.
+const publishTimeout = 10 * time.Second
+
 func (p *Producer[T]) Publish(ctx context.Context, message T, id string, _ time.Time) error {
+	ctx, cancel := context.WithTimeout(ctx, publishTimeout)
+	defer cancel()
+
 	i := []byte(id)
 	b, err := proto.Marshal(message)
 	if err != nil {
