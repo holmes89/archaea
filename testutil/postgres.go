@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	docker "github.com/ory/dockertest/v3/docker"
 
@@ -52,9 +53,13 @@ func SetupPostgres(user, password, dbName string, connect func(dsn string) error
 		log.Fatalf("testutil: could not start postgres container: %v", err)
 	}
 
-	dsn = fmt.Sprintf("%s:%s@localhost:%s/%s?sslmode=disable",
+	// Use 127.0.0.1 rather than localhost: localhost can resolve to ::1, but
+	// Docker publishes the container port on IPv4 only, so dials get refused.
+	dsn = fmt.Sprintf("%s:%s@127.0.0.1:%s/%s?sslmode=disable",
 		user, password, resource.GetPort("5432/tcp"), dbName)
 
+	// Allow extra time on loaded machines (default is 60s).
+	pool.MaxWait = 120 * time.Second
 	if err := pool.Retry(func() error { return connect(dsn) }); err != nil {
 		pool.Purge(resource) //nolint:errcheck
 		log.Fatalf("testutil: postgres never became ready: %v", err)
