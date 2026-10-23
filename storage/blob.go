@@ -93,7 +93,7 @@ func NewClientFromEnv(defaultBucket string) *BlobClient {
 func (c *BlobClient) Download(ctx context.Context, key string) (io.ReadCloser, error) {
 	r, err := c.bucket.NewReader(ctx, key, nil)
 	if err != nil {
-		return nil, fmt.Errorf("open blob reader for %s: %w", key, err)
+		return nil, wrapErr(fmt.Sprintf("open blob reader for %s", key), err)
 	}
 	return r, nil
 }
